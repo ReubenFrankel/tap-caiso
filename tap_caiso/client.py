@@ -2,177 +2,96 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Callable, Iterable
-
-import requests
 import csv
+import typing as t
+from datetime import date, datetime, timedelta
 from io import StringIO
-import datetime
-from datetime import date
-from datetime import timedelta
-from singer_sdk.helpers.jsonpath import extract_jsonpath
+from pathlib import Path
+
+import pendulum
 from singer_sdk.pagination import BaseAPIPaginator  # noqa: TCH002
 from singer_sdk.streams import RESTStream
 
-_Auth = Callable[[requests.PreparedRequest], requests.PreparedRequest]
+# we use the same date format in multiple places, so let's make it a constant
+DATE_FORMAT = "%Y%m%d"
+
 SCHEMAS_DIR = Path(__file__).parent / Path("./schemas")
 
+
 class caisoPaginator(BaseAPIPaginator):
-    def has_more(self, response):
-        
-        url = response.request.url
-
-        date = url[:50]
-        year = int(date[0:4])
-        month = int(date)
-        day = int(date[6:8])
-
-        earliest = datetime.datetime(2018, 4, 10)
-        current = datetime.datetime(year, month, day)
-
-        if current < earliest:
-            return False
-        return True
-
-    def get_next(self, response):
-        url = response.request.url
-
-        date = url[41:49]
-        year = date[0:4]
-        month = date[4:6]
-        day = date[6:8]
-
-        current = datetime.datetime(year, month, day)
-        new = current - timedelta(days=1)
-        new = new.strftime("%Y%m%d")
-
-        return new
-    
     def __init__(self, *args, **kwargs):
         super().__init__(None, *args, **kwargs)
+
+    def has_more(self, response):
+        # there should be more records to fetch if the date to be requested next is
+        # before the current date
+
+        # we cannot include the current date as there is no guarantee the data will be
+        # available or complete until the day is up
+        return self.get_next(response) < date.today()
+
+    def get_next(self, response):
+        # parse the date from the previously requested url and return the next `date`
+        # value
+
+        # assumes date value is always second-to-last segment of url path
+        prev_date_str = response.request.path_url.split("/")[-2]
+        prev_date = datetime.strptime(prev_date_str, DATE_FORMAT).date()
+
+        # increment date by one day
+        return prev_date + timedelta(days=1)
+
 
 class caisoStream(RESTStream):
     """caiso stream class."""
 
-    @property
-    def url_base(self) -> str:
-        """Return the API URL root, configurable via tap settings."""
-        # TODO: hardcode a value here, or retrieve it from self.config
-        today = date.today()
-        yesterday = today - timedelta(days=1)
-        y_date = yesterday.strftime("%Y%m%d")
-        self.logger.info(url)
-        url = f"https://www.caiso.com/outlook/SP/History/{y_date}"
-        return url
+    # dynamic fallback start date of the last 4 weeks
+    fallback_start_date = date.today() - timedelta(weeks=4)
 
-    records_jsonpath = "$[*]"  # Or override `parse_response`.
+    # templated url string that we populate in `prepare_request`
+    url_base = "https://www.caiso.com/outlook/SP/History/{date}"
 
-    # Set this value or override `get_new_paginator`.
-    next_page_token_jsonpath = "$.next_page"  # noqa: S105
-    
+    def get_new_paginator(self):
+        return caisoPaginator()
 
-    @property
-    def http_headers(self) -> dict:
-        """Return the http headers needed.
-
-        Returns:
-            A dictionary of HTTP headers.
-        """
-        headers = {}
-        if "user_agent" in self.config:
-            headers["User-Agent"] = self.config.get("user_agent")
-
-        # If not using an authenticator, you may also provide inline auth headers:
-        # headers["Private-Token"] = self.config.get("auth_token")  # noqa: ERA001
-        return headers
-
-    def get_new_paginator(self) -> BaseAPIPaginator:
-        """Create a new pagination helper instance.
-
-        If the source API can make use of the `next_page_token_jsonpath`
-        attribute, or it contains a `X-Next-Page` header in the response
-        then you can remove this method.
-
-        If you need custom pagination that uses page numbers, "next" links, or
-        other approaches, please read the guide: https://sdk.meltano.com/en/v0.25.0/guides/pagination-classes.html.
-
-        Returns:
-            A pagination helper instance.
-        """
-        #today = date.today()
-        #yesterday = today - timedelta(days=1)
-        #yesterday = yesterday.strftime("%Y%m%d")
-        return caisoPaginator()#(date.today()-timedelta(days=1)).strftime("%Y%m%d"))
-
-    def get_url_params(
-        self,
-        context: dict | None,  # noqa: ARG002
-        next_page_token: Any | None,  # noqa: ANN401
-    ) -> dict[str, Any]:
-        """Return a dictionary of values to be used in URL parameterization.
-
-        Args:
-            context: The stream context.
-            next_page_token: The next page index or value.
-
-        Returns:
-            A dictionary of URL query parameters.
-        """
-        params: dict = {}
-        if next_page_token:
-            params["page"] = next_page_token
-        if self.replication_key:
-            params["sort"] = "asc"
-            params["order_by"] = self.replication_key
-        return params
-
-    def prepare_request(self, context, next_page_token):
-        
+    def prepare_request(self, context, next_page_token: date | None):
         prepared_request = super().prepare_request(context, next_page_token)
-        
-        start_date = self.get_starting_timestamp(context) or self.config["start_date"] or self.default_start_date
-        date = next_page_token or start_date.strftime("%Y%m%d")
 
-        base = self.url_base
-        no_date = base[:41]
-        url = f"{no_date}{date}"
+        # resolve the current date in heirachical order
+        start_date_str = self.config.get("start_date")
+        start_date = (
+            t.cast(date, pendulum.parse(start_date_str)) if start_date_str else None
+        )
+        current_date = (
+            next_page_token  # from paginator
+            or start_date  # from config
+            or self.fallback_start_date  # fallback
+        )
+        self.logger.info(f"Current date: {current_date}")
 
-        headers = self.http_headers
+        # populate the base url date in the format we want
+        url = self.url_base.format(date=current_date.strftime(DATE_FORMAT))
+        self.logger.info(f"Current URL: {url}")
 
+        # set the new url for the prepared request
         prepared_request.prepare_url(
             url,
             self.get_url_params(context, next_page_token),
         )
 
         return prepared_request
-        
-    def parse_response(self, response: requests.Response) -> Iterable[dict]:
-        """Parse the response and return an iterator of result records.
 
-        Args:
-            response: The HTTP ``requests.Response`` object.
+    def parse_response(self, response):
+        # invalid date does not cause api to return client error - instead, it
+        # returns some html page
 
-        Yields:
-            Each record from the source.
-        """
-        # TODO: Parse response body and return a set of records.
-        data = list(csv.DictReader(StringIO(response.text)))
-        yield from extract_jsonpath(self.records_jsonpath, input=data)
+        # when we do get some csv data back, the response contains a specific content
+        # type header - we can use this to check before trying to parse the response
+        # text (which could be the afforementioned html page content)
+        if response.headers["Content-Type"] != "application/octet-stream":
+            raise RuntimeError(f"No CSV data available: {response.request.path_url}")
 
-    def post_process(
-        self,
-        row: dict,
-        context: dict | None = None,  # noqa: ARG002
-    ) -> dict | None:
-        """As needed, append or transform raw data to match expected structure.
-
-        Args:
-            row: An individual record from the stream.
-            context: The stream context.
-
-        Returns:
-            The updated record dictionary, or ``None`` to skip the record.
-        """
-        # TODO: Delete this method if not needed.
-        return row
+        # for a valid response, data comes back as a csv - let's parse it as a list of
+        # records, where each element is a mapping of the header keys to the
+        # corresponding row values
+        yield from csv.DictReader(StringIO(response.text))
