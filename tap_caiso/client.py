@@ -9,6 +9,7 @@ from io import StringIO
 from pathlib import Path
 
 import pendulum
+import requests
 from singer_sdk.pagination import BaseAPIPaginator  # noqa: TCH002
 from singer_sdk.streams import RESTStream
 
@@ -34,12 +35,8 @@ class caisoPaginator(BaseAPIPaginator):
         # parse the date from the previously requested url and return the next `date`
         # value
 
-        # assumes date value is always second-to-last segment of url path
-        prev_date_str = response.request.path_url.split("/")[-2]
-        prev_date = datetime.strptime(prev_date_str, DATE_FORMAT).date()
-
         # increment date by one day
-        return prev_date + timedelta(days=1)
+        return caisoStream.get_date_from_request_url(response) + timedelta(days=1)
 
 
 class caisoStream(RESTStream):
@@ -91,7 +88,20 @@ class caisoStream(RESTStream):
         if response.headers["Content-Type"] != "application/octet-stream":
             raise RuntimeError(f"No CSV data available: {response.request.path_url}")
 
+        # get the current date from the request url
+        current_date = self.get_date_from_request_url(response)
+
         # for a valid response, data comes back as a csv - let's parse it as a list of
         # records, where each element is a mapping of the header keys to the
         # corresponding row values
-        yield from csv.DictReader(StringIO(response.text))
+        for record in csv.DictReader(StringIO(response.text)):
+            record["current_date"] = current_date  # set current date as record property
+            yield record
+
+    @staticmethod
+    def get_date_from_request_url(response: requests.Response):
+        # assumes date value is always second-to-last segment of url path
+        url_date_str = response.request.path_url.split("/")[-2]
+        url_date = datetime.strptime(url_date_str, DATE_FORMAT).date()
+
+        return url_date
