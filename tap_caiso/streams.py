@@ -25,7 +25,7 @@ class DemandStream(caisoStream):
     name = "demand"
     path = url_base
     primary_keys: t.ClassVar[list[str]] = ["id"]
-    replication_key = None
+
     # Optionally, you may also use `schema_filepath` in place of `schema`:
     # schema_filepath = SCHEMAS_DIR / "users.json"  # noqa: ERA001
     schema = th.PropertiesList(

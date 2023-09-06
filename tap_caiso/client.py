@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import csv
-import typing as t
 from datetime import date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 
-import pendulum
 import requests
 from singer_sdk.pagination import BaseAPIPaginator  # noqa: TCH002
 from singer_sdk.streams import RESTStream
@@ -48,6 +46,9 @@ class caisoStream(RESTStream):
     # templated url string that we populate in `prepare_request`
     url_base = "https://www.caiso.com/outlook/SP/History/{date}"
 
+    # state marker property
+    replication_key = "current_date"
+
     def get_new_paginator(self):
         return caisoPaginator()
 
@@ -55,13 +56,9 @@ class caisoStream(RESTStream):
         prepared_request = super().prepare_request(context, next_page_token)
 
         # resolve the current date in heirachical order
-        start_date_str = self.config.get("start_date")
-        start_date = (
-            t.cast(date, pendulum.parse(start_date_str)) if start_date_str else None
-        )
         current_date = (
             next_page_token  # from paginator
-            or start_date  # from config
+            or self.get_starting_timestamp(context)  # from state or config
             or self.fallback_start_date  # fallback
         )
         self.logger.info(f"Current date: {current_date}")
@@ -95,7 +92,9 @@ class caisoStream(RESTStream):
         # records, where each element is a mapping of the header keys to the
         # corresponding row values
         for record in csv.DictReader(StringIO(response.text)):
-            record["current_date"] = current_date  # set current date as record property
+            record[
+                "current_date"
+            ] = current_date.isoformat()  # set current date as record property
             yield record
 
     @staticmethod
