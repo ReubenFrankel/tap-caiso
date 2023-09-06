@@ -30,9 +30,9 @@ class DemandStream(caisoStream):
     # schema_filepath = SCHEMAS_DIR / "users.json"  # noqa: ERA001
     schema = th.PropertiesList(
         th.Property("Time", th.TimeType),
-        th.Property(
-            "Current demand",
-            th.IntegerType,
-            description="The user's system ID",
-        ),
+        th.Property("Day ahead forecast", th.StringType),
+        th.Property("Hour ahead forecast", th.StringType),
+        th.Property("Current demand", th.StringType),
+        th.Property("Demand response", th.StringType),
+        th.Property("current_date", th.DateTimeType),
     ).to_dict()
